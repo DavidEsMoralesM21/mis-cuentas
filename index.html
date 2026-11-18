@@ -336,14 +336,24 @@ function saldos(){
     if(m.tipo==='Transferencia'){ ap(m.cuenta,m,-1); ap(m.destino,m,+1); } else if(m.tipo==='Ingreso') ap(m.cuenta,m,+1); else { ap(m.cuenta,m,-1); if(m.destino) ap(m.destino,m,+1); } }
   return s;
 }
-function porSeparar(t){ return MOVS.filter(m=>m.tipo==='Egreso'&&m.estado==='pagado'&&m.cuenta===t.id&&!m.separado&&incluye(m,t)); }
+/* Compras con tarjeta que aún no separaste: las nuevas y las del extracto/ciclo vigentes (aunque vengan del Excel) */
+function porSeparar(t){ const c=ciclo(t); const desde=c?c.ext.desde:'9999';
+  return MOVS.filter(m=>m.tipo==='Egreso'&&m.estado==='pagado'&&m.cuenta===t.id&&!m.separado&&(incluye(m,t)||m.fecha>=desde)); }
+const tcCfg = t => ((cfg().tc||{})[t.id])||{};
+const mesesEntre = (a,b) => { const [ya,ma]=a.split('-').map(Number), [yb,mb]=b.split('-').map(Number); return (yb-ya)*12+(mb-ma); };
+/* Cajita de cada ciclo: si alternas dos cajitas (una por ciclo), se turnan mes a mes */
+function cajitaDe(t,hasta){ const c=tcCfg(t);
+  if(c.alt&&c.alt.length===2&&c.base&&hasta){ const k=((mesesEntre(c.base,ym(hasta))%2)+2)%2; return cuenta(c.alt[k])||cuenta(t.cajita); }
+  return cuenta(t.cajita); }
 
 /* ---------- ciclo de la tarjeta (corte y pago) ----------
    Ej: corte 15, pago 3 → compras del 16 oct al 15 nov se pagan hasta el 3 dic. */
-function corteHasta(d,dia){ const c=clampDay(ym(d),dia); return c<=d?c:clampDay(addMonths(ym(d),-1),dia); }
+/* El banco a veces corta unos días antes o después: se puede ajustar la fecha real de cada corte */
+function corteDe(t,m){ const o=(tcCfg(t).cortes||{})[m]; return o||clampDay(m,Number(t.corte_dia)); }
+function corteHasta(d,t){ const c=corteDe(t,ym(d)); return c<=d?c:corteDe(t,addMonths(ym(d),-1)); }
 function ciclo(t){
   const dia=Number(t.corte_dia)||0, pd=Number(t.pago_dia)||0; if(!dia) return null;
-  const hoy=today(); const last=corteHasta(addDays(hoy,-1),dia), prev=corteHasta(addDays(last,-1),dia), next=clampDay(addMonths(ym(last),1),dia);
+  const hoy=today(); const last=corteHasta(addDays(hoy,-1),t), prev=corteHasta(addDays(last,-1),t), next=corteDe(t,addMonths(ym(last),1));
   const pagoDe=c=>pd?clampDay(pd>Number(c.slice(8))?ym(c):addMonths(ym(c),1),pd):null;
   const compras=(a,b)=>MOVS.filter(m=>m.tipo==='Egreso'&&m.estado==='pagado'&&m.cuenta===t.id&&m.fecha>a&&m.fecha<=b);
   const ext={desde:addDays(prev,1),hasta:last,pago:pagoDe(last)}; ext.compras=compras(prev,last); ext.total=sum(ext.compras);
@@ -489,7 +499,7 @@ function bindInicio(){ bindMonth();
 
 /* ================= TARJETA Y DEUDAS ================= */
 function tarjetaCard(t,sal,compact){
-  const deuda=sal[t.id]; const caj=cuenta(t.cajita); const enCaj=caj?sal[caj.id]:0; const c=ciclo(t);
+  const deuda=sal[t.id]; const c=ciclo(t); const caj=c?cajitaDe(t,c.ext.hasta):cuenta(t.cajita); const enCaj=caj?sal[caj.id]:0; const cajAct=c?cajitaDe(t,c.act.hasta):null;
   const ps=porSeparar(t); const psTot=sum(ps); const hoy=today();
   let h=`<div class="card"><h3>💳 ${esc(t.nombre)} <span class="r out">Debes ${fmt(deuda)}</span></h3>`;
   if(c){
@@ -502,19 +512,19 @@ function tarjetaCard(t,sal,compact){
       ${c.ext.pendiente?`${caj?`<div class="bar"><i style="width:${Math.max(2,pct)}%"></i></div><div class="small muted">${falta?`Te falta separar ${fmt(falta)}${dias!=null&&dias>=0?` · quedan ${dias} días`:''}`:'✅ Ya tienes en la cajita lo del extracto'}</div>`:''}`
         :`<div class="note">✅ Extracto pagado${c.ext.pagado?` (${fmt(c.ext.pagado)})`:''}.</div>`}
       <div class="sect"><div class="t">Ciclo actual: ${shortDate(c.act.desde)} – ${shortDate(c.act.hasta)}</div>
-        <div class="split"><div>Compras<b>${fmt(c.act.total)}</b></div><div style="text-align:right">Se paga el<b>${c.act.pago?shortDate(c.act.pago):'—'}</b></div></div></div>`;
+        <div class="split"><div>Compras<b>${fmt(c.act.total)}</b></div>${cajAct&&cajAct.id!==caj?.id?`<div>En ${esc(cajAct.nombre)}<b>${fmt(sal[cajAct.id])}</b></div>`:''}<div style="text-align:right">Se paga el<b>${c.act.pago?shortDate(c.act.pago):'—'}</b></div></div></div>`;
     if(!c.ext.compras.length&&!c.act.compras.length) h+=`<div class="note warn">No veo compras enlazadas a esta tarjeta. Si importaste tu historial, ve a <b>Ajustes → Relacionar historial</b> para enlazar las compras con crédito.</div>`;
   } else h+=`<div class="note warn">Configura el día de corte y de pago (toca la tarjeta en tus cuentas) para ver el extracto.</div>`;
   if(!caj) h+=`<div class="note warn">Elige en qué cajita guardas la plata de esta tarjeta.</div>`;
   if(ps.length) h+=`<div class="note warn" style="display:flex;align-items:center;gap:10px"><div style="flex:1"><b>${ps.length} compra${ps.length>1?'s':''} sin separar</b><br>${fmt(psTot)}</div><button class="btn small" data-sep="${t.id}">Separar</button></div>`;
-  if(!compact) h+=`<button class="btn sec" data-paytc="${t.id}">Pagar tarjeta</button>`;
+  if(!compact) h+=`<div class="row"><button class="btn sec" data-paytc="${t.id}">Pagar tarjeta</button><button class="btn sec" data-tccfg="${t.id}">⚙️ Corte y cajitas</button></div>`;
   return h+'</div>';
 }
 function viewTarjeta(){
   const ts=tarjetas(), ds=deudas(); const sal=saldos(); let h='';
   if(!ts.length) h+=`<div class="card"><h3>💳 Aún no tienes tarjeta</h3><p class="small muted">Agrégala con lo que debes hoy, el día de corte, el día de pago y la cajita donde guardas la plata para pagarla.</p><button class="btn" data-new="tarjeta">Agregar tarjeta de crédito</button></div>`;
   for(const t of ts){ h+=tarjetaCard(t,sal,false); const c=ciclo(t);
-    if(c){ const lista=(arr,tit)=>`<div class="day">${tit}</div><div class="card" style="padding:2px 12px">${arr.length?`<ul class="list">${arr.sort((a,b)=>b.fecha.localeCompare(a.fecha)).map(r=>`<li class="item" data-mov="${r.id}"><div class="main"><div class="t">${esc(r.concepto)}</div><div class="s">${esc(r.categoria)} · ${shortDate(r.fecha)}${incluye(r,t)?(r.separado?'<span class="tag ok">Separado</span>':'<span class="tag warn">Sin separar</span>'):''}</div></div><div class="v">${fmt(r.monto)}</div></li>`).join('')}</ul>`:'<div class="empty">Sin compras</div>'}</div>`;
+    if(c){ const lista=(arr,tit)=>`<div class="day">${tit}</div><div class="card" style="padding:2px 12px">${arr.length?`<ul class="list">${arr.sort((a,b)=>b.fecha.localeCompare(a.fecha)).map(r=>`<li class="item" data-mov="${r.id}"><div class="main"><div class="t">${esc(r.concepto)}</div><div class="s">${esc(r.categoria)} · ${shortDate(r.fecha)}${r.separado?'<span class="tag ok">Separado</span>':'<span class="tag warn">Sin separar</span>'}</div></div><div class="v">${fmt(r.monto)}</div></li>`).join('')}</ul>`:'<div class="empty">Sin compras</div>'}</div>`;
       h+=lista(c.act.compras,`Compras del ciclo actual · ${fmt(c.act.total)}`)+`<details><summary>Ver las ${c.ext.compras.length} compras del extracto · ${fmt(c.ext.total)}</summary>${lista(c.ext.compras,'Compras del extracto')}</details>`; } }
   h+=`<div class="day">Deudas y préstamos</div><div class="card">${ds.length?`<ul class="list">${ds.map(d=>`<li class="item" data-acc="${d.id}"><div class="ic">${TIPOS_CUENTA[d.tipo].e}</div><div class="main"><div class="t">${esc(d.nombre)}</div><div class="s">${d.tipo==='deuda'?'Le debes':txtPersona(d,sal[d.id])}${d.pago_dia?` · abonas el ${d.pago_dia} de cada mes`:''}</div></div><div class="v ${d.tipo==='deuda'||sal[d.id]<0?'out':'in'}">${fmt(Math.abs(sal[d.id]))}</div></li>`).join('')}</ul>`:'<p class="small muted" style="margin:0"><b>Le debo a alguien</b>: un préstamo que vas abonando. <b>Persona (cruce de cuentas)</b>: alguien con quien cruzas cuentas, como tu mamá. Lo que le corresponde se le descuenta, lo que pagas por ella se le suma, y la app te dice quién le debe a quién.</p>'}
     <div class="row"><button class="btn sec" data-new="deuda">＋ Le debo a alguien</button><button class="btn sec" data-new="prestamo">＋ Persona (cruce de cuentas)</button></div></div>
@@ -525,6 +535,7 @@ function bindTarjeta(){ $('#main').onclick=e=>{
   const n=e.target.closest('[data-new]'); if(n) return cuentaEditDlg({tipo:n.dataset.new});
   const s=e.target.closest('[data-sep]'); if(s) return separarDlg(cuenta(s.dataset.sep));
   const p=e.target.closest('[data-paytc]'); if(p) return pagarPasivoDlg(cuenta(p.dataset.paytc));
+  const g=e.target.closest('[data-tccfg]'); if(g) return tcCfgDlg(cuenta(g.dataset.tccfg));
   const a=e.target.closest('[data-acc]'); if(a) return cuentaDlg(cuenta(a.dataset.acc));
   const mv=e.target.closest('[data-mov]'); if(mv){ const r=MOVS.find(x=>x.id===mv.dataset.mov); if(r) editar(r); } }; }
 function chipsCuentas(id,list,sel){ return `<div class="chips" id="${id}">${list.map(c=>`<button class="chip ${c.id===sel?'on':''}" data-id="${c.id}">${esc(accLabel(c))}</button>`).join('')}</div>`; }
@@ -532,29 +543,49 @@ function bindChips(sel,cb){ const box=$(sel); if(!box) return; box.onclick=e=>{ 
 const origenesPago = () => CUENTAS.filter(c=>c.tipo==='banco'||c.tipo==='cajita'||c.tipo==='efectivo');
 
 function separarDlg(t){
-  const ps=porSeparar(t).sort((a,b)=>a.fecha.localeCompare(b.fecha)); const caj=cuenta(t.cajita);
-  const origenes=origenesPago().filter(c=>c.id!==t.cajita); let desde=origenes.find(c=>c.tipo==='banco')?.id||origenes[0]?.id||'';
-  const d=$('#dlg'); const puede=caj&&origenes.length;
+  const ps=porSeparar(t).sort((a,b)=>a.fecha.localeCompare(b.fecha)); const cc=ciclo(t);
+  const enExt=cc&&ps.some(r=>r.fecha<cc.act.desde); let caj=cc?cajitaDe(t,enExt?cc.ext.hasta:cc.act.hasta):cuenta(t.cajita);
+  const cajs=CUENTAS.filter(c=>c.tipo==='cajita'); const origenes=origenesPago(); let desde=origenes.find(c=>c.tipo==='banco')?.id||origenes[0]?.id||'';
+  const d=$('#dlg'); const puede=cajs.length&&origenes.length;
   d.innerHTML=`<h3>Separar para ${esc(t.nombre)}</h3><p class="small muted" style="margin:0 0 8px">Marca las compras que ya cubriste.</p>
     <ul class="list" id="sepl">${ps.map(r=>`<li class="item"><input type="checkbox" checked data-id="${r.id}" data-v="${r.monto||0}"><div class="main"><div class="t">${esc(r.concepto)}</div><div class="s">${shortDate(r.fecha)} · ${esc(r.categoria)}</div></div><div class="v">${fmt(r.monto)}</div></li>`).join('')}</ul>
     <div class="kpi" style="margin-top:10px"><div class="k">Total a separar</div><div class="n" id="septot"></div></div>
-    <label class="switch"><input type="checkbox" id="sepmov" ${puede?'checked':'disabled'}> Registrar que moví esta plata a ${caj?esc(caj.nombre):'la cajita'}</label>
-    <div id="sepdesde" class="${puede?'':'hide'}"><label class="lbl">Desde</label>${chipsCuentas('sepo',origenes,desde)}</div>
+    <label class="switch"><input type="checkbox" id="sepmov" ${puede?'checked':'disabled'}> Registrar que moví esta plata a la cajita</label>
+    <div id="sepdesde" class="${puede?'':'hide'}"><label class="lbl">¿A qué cajita?</label>${chipsCuentas('sepc',cajs,caj?.id)}<label class="lbl">Desde</label>${chipsCuentas('sepo',origenes,desde)}</div>
     <button class="btn" id="sepok">Separar</button><button class="btn sec" id="sepno">Cancelar</button>`;
   const tot=()=>sum([...d.querySelectorAll('#sepl input:checked')],i=>i.dataset.v); const upd=()=>$('#septot').textContent=fmt(tot()); upd();
-  $('#sepl').onchange=upd; bindChips('#sepo',id=>desde=id); $('#sepmov').onchange=e=>$('#sepdesde').classList.toggle('hide',!e.target.checked); $('#sepno').onclick=()=>d.close();
+  $('#sepl').onchange=upd; bindChips('#sepo',id=>desde=id); bindChips('#sepc',id=>caj=cuenta(id)); $('#sepmov').onchange=e=>$('#sepdesde').classList.toggle('hide',!e.target.checked); $('#sepno').onclick=()=>d.close();
   $('#sepok').onclick=async()=>{ const ids=[...d.querySelectorAll('#sepl input:checked')].map(i=>i.dataset.id); if(!ids.length){ toast('Marca al menos una compra'); return; }
     $('#sepok').disabled=true;
     try{ for(const id of ids){ await S.update('movimientos',id,{separado:true}); const m=MOVS.find(x=>x.id===id); if(m) m.separado=true; }
-      if($('#sepmov').checked&&caj&&desde) MOVS.unshift(await S.create('movimientos',{fecha:today(),tipo:'Transferencia',categoria:'Transferencia',concepto:`Separado para ${t.nombre}`,monto:tot(),presupuesto:null,metodo:'Transferencia',cuenta:desde,destino:caj.id,estado:'pagado',separado:false,vence:'',nota:''}));
+      if($('#sepmov').checked&&caj&&desde&&desde!==caj.id) MOVS.unshift(await S.create('movimientos',{fecha:today(),tipo:'Transferencia',categoria:'Transferencia',concepto:`Separado para ${t.nombre}`,monto:tot(),presupuesto:null,metodo:'Transferencia',cuenta:desde,destino:caj.id,estado:'pagado',separado:false,vence:'',nota:''}));
       d.close(); toast(`Separaste ${fmt(tot())}`); render(); }catch(e){ toast(e.status?e.message:'Sin conexión'); $('#sepok').disabled=false; } };
+  d.showModal();
+}
+function tcCfgDlg(t){
+  const c=ciclo(t); if(!c){ toast('Primero pon el día de corte y de pago (Editar cuenta)'); return; }
+  const k=tcCfg(t); const cajs=CUENTAS.filter(x=>x.tipo==='cajita'); let cExt=cajitaDe(t,c.ext.hasta)?.id||'', cAct=cajitaDe(t,c.act.hasta)?.id||''; const d=$('#dlg');
+  d.innerHTML=`<h3>Corte y cajitas · ${esc(t.nombre)}</h3>
+    <p class="small muted" style="margin:0">Corte normal el día ${t.corte_dia}, pago el día ${t.pago_dia}. Si el banco cortó otro día, pon la fecha real.</p>
+    <div class="row"><div><label class="lbl">Corte anterior</label><input class="txt" type="date" id="kprev" value="${addDays(c.ext.desde,-1)}"></div>
+      <div><label class="lbl">Último corte</label><input class="txt" type="date" id="klast" value="${c.ext.hasta}"></div></div>
+    <label class="lbl">Cajita del extracto que pagas el ${c.ext.pago?shortDate(c.ext.pago):'—'}</label>${chipsCuentas('kext',cajs,cExt)}
+    <label class="lbl">Cajita del ciclo actual (se paga el ${c.act.pago?shortDate(c.act.pago):'—'})</label>${chipsCuentas('kact',cajs,cAct)}
+    <p class="small muted">Si eliges dos cajitas distintas, se turnan: cada ciclo nuevo usa la que quedó libre al pagar.</p>
+    <button class="btn" id="kok">Guardar</button><button class="btn sec" id="kno">Cancelar</button>`;
+  bindChips('#kext',id=>cExt=id); bindChips('#kact',id=>cAct=id); $('#kno').onclick=()=>d.close();
+  $('#kok').onclick=async()=>{ const C=JSON.parse(JSON.stringify(cfg())); C.tc=C.tc||{}; const x=C.tc[t.id]=C.tc[t.id]||{}; x.cortes=x.cortes||{};
+    const kp=$('#kprev').value, kl=$('#klast').value;
+    if(kp) x.cortes[ym(kp)]=kp; if(kl) x.cortes[ym(kl)]=kl;
+    if(cExt&&cAct&&cExt!==cAct){ x.alt=[cExt,cAct]; x.base=ym(kl||c.ext.hasta); } else { delete x.alt; delete x.base; }
+    try{ await savePerfil({config:C}); if(cExt&&cExt!==t.cajita){ await S.update('cuentas',t.id,{cajita:cExt}); t.cajita=cExt; } d.close(); toast('Guardado'); refreshBadge(); render(); }catch(e){ toast(e.message); } };
   d.showModal();
 }
 /* Pagar tarjeta o abonar a una deuda: plata que sale de una cuenta y baja lo que debes */
 function pagarPasivoDlg(c,monto){
   const sal=saldos(); const tc=c.tipo==='tarjeta'; const origenes=origenesPago(); if(!origenes.length){ toast('Primero agrega la cuenta desde donde pagas'); return; }
-  let desde=tc&&cuenta(c.cajita)?c.cajita:(origenes.find(o=>o.tipo==='banco')?.id||origenes[0].id);
-  const cc=tc?ciclo(c):null; const sug=monto??(cc&&cc.ext.pendiente?cc.ext.pendiente:Math.max(sal[c.id],0));
+  const cc=tc?ciclo(c):null; const cajExt=tc?(cc?cajitaDe(c,cc.ext.hasta):cuenta(c.cajita)):null;
+  let desde=cajExt?cajExt.id:(origenes.find(o=>o.tipo==='banco')?.id||origenes[0].id); const sug=monto??(cc&&cc.ext.pendiente?cc.ext.pendiente:Math.max(sal[c.id],0));
   const d=$('#dlg');
   d.innerHTML=`<h3>${tc?'Pagar':'Abonar a'} ${esc(c.nombre)}</h3><p class="small muted" style="margin:0">Debes en total ${fmt(sal[c.id])}${cc&&cc.ext.pendiente?` · extracto ${fmt(cc.ext.pendiente)}`:''}</p>
     <label class="lbl">Monto</label><div class="amount"><span>$</span><input id="ptm" inputmode="numeric" value="${moneyStr(sug)}"></div>
@@ -587,7 +618,7 @@ function cobrarDlg(c,modo='cobro',monto){ // cobro: la persona te devuelve plata
 /* ---------- cuentas: ver, cuadrar, editar ---------- */
 function cuentaDlg(c){
   const sal=saldos()[c.id]; const pas=PASIVO(c.tipo); const d=$('#dlg');
-  const movs=MOVS.filter(m=>m.estado==='pagado'&&(m.cuenta===c.id||m.destino===c.id)&&incluye(m,c)).slice(0,6);
+  const movs=MOVS.filter(m=>m.estado==='pagado'&&(m.cuenta===c.id||m.destino===c.id)).slice(0,8);
   const verbo=pas?'debes':c.tipo==='prestamo'?`te debe ${c.nombre} (negativo = le debes)`:'tienes';
   d.innerHTML=`<h3>${accLabel(c)}</h3><p class="small muted" style="margin:0">${TIPOS_CUENTA[c.tipo].n}</p>
     <div class="kpi" style="margin-top:10px"><div class="k">La app calcula que ${verbo}</div><div class="n ${pas?'out':''}">${fmt(sal)}</div></div>
@@ -804,15 +835,32 @@ function pagarDlg(r){
     catch(e){ toast(e.status?e.message:'Sin conexión, intenta de nuevo'); $('#pok').disabled=false; } };
   d.showModal();
 }
+/* Fijos del mes anterior: eliges uno por uno si queda pendiente, si ya lo pagaste o si no aplica este mes */
 async function traerFijos(){
   const cur=ym(today()), prev=addMonths(cur,-1); const antes=MOVS.filter(m=>ym(m.fecha)===prev), ahora=MOVS.filter(m=>ym(m.fecha)===cur);
-  const key=r=>(r.categoria+'|'+r.concepto).toLowerCase(); const ya=new Set(ahora.map(key)), vistos=new Set(), nuevos=[];
-  for(const r of antes){ if(r.tipo!=='Egreso'||!esFija(r.categoria)) continue; const k=key(r); if(ya.has(k)||vistos.has(k)) continue; vistos.add(k);
+  const key=r=>(r.categoria+'|'+r.concepto).toLowerCase(); const omit=new Set(((cfg().fijosOmitidos||{})[cur])||[]);
+  const ya=new Set(ahora.map(key)), vistos=new Set(), items=[];
+  for(const r of antes){ if(r.tipo!=='Egreso'||!esFija(r.categoria)||r.destino) continue; const k=key(r); if(ya.has(k)||vistos.has(k)||omit.has(k)) continue; vistos.add(k);
     const v=r.presupuesto||r.monto; if(!v) continue; const f=`${cur}-${r.fecha.slice(8,10)>'28'?'28':r.fecha.slice(8,10)}`;
-    nuevos.push({fecha:f,vence:f,tipo:'Egreso',categoria:r.categoria,concepto:r.concepto,metodo:r.metodo,cuenta:r.cuenta||'',destino:'',estado:'pendiente',presupuesto:v,monto:null,separado:false,nota:''}); }
-  if(!nuevos.length){ toast('No hay fijos nuevos para traer'); return; }
-  if(!confirm(`Se crearán ${nuevos.length} pagos pendientes por ${fmt(sum(nuevos,r=>r.presupuesto))}:\n\n${nuevos.map(r=>'• '+r.concepto+' '+fmt(r.presupuesto)).join('\n')}\n\nLos que ya pagaste puedes marcarlos con "Pagar" o eliminarlos.`)) return;
-  try{ for(const r of nuevos) MOVS.unshift(await S.create('movimientos',r)); toast(`${nuevos.length} pagos fijos creados`); refreshBadge(); render(); }catch(e){ toast(e.status?e.message:'Sin conexión'); }
+    items.push({k,accion:'pend',r:{fecha:f,vence:f,tipo:'Egreso',categoria:r.categoria,concepto:r.concepto,metodo:r.metodo,cuenta:r.cuenta||'',destino:'',estado:'pendiente',presupuesto:v,monto:null,separado:false,nota:''}}); }
+  if(!items.length){ toast('No hay fijos nuevos para traer'); return; }
+  const lista=CUENTAS.filter(c=>c.tipo!=='prestamo'||true); let cid=lista.find(c=>c.tipo==='banco')?.id||lista[0]?.id||''; const d=$('#dlg');
+  const draw=()=>{ d.innerHTML=`<h3>Pagos fijos de ${monthShort(prev).toLowerCase()}</h3><p class="small muted" style="margin:0 0 6px">Elige qué pasa con cada uno este mes.</p>
+    <ul class="list">${items.map((x,i)=>`<li class="item" style="flex-wrap:wrap"><div class="main"><div class="t">${esc(x.r.concepto)}</div><div class="s">${esc(x.r.categoria)} · ${fmt(x.r.presupuesto)}</div></div>
+      <div class="seg" data-i="${i}" style="flex:1 1 100%;margin-top:6px">${[['pend','Pendiente'],['pag','Ya lo pagué'],['no','No este mes']].map(([a,n])=>`<button data-a="${a}" class="${x.accion===a?'on':''}">${n}</button>`).join('')}</div></li>`).join('')}</ul>
+    ${items.some(x=>x.accion==='pag')&&lista.length?`<label class="lbl">Los que ya pagaste, ¿con qué?</label>${chipsCuentas('fcta',lista,cid)}<p class="small muted">Se registran como pagados hoy. Si fue en otra fecha o por otro valor, edítalos después.</p>`:''}
+    <button class="btn" id="fok">Aplicar</button><button class="btn sec" id="fno">Cancelar</button>`;
+    d.querySelectorAll('.seg[data-i]').forEach(sg=>sg.onclick=e=>{ const a=e.target.closest('button')?.dataset.a; if(!a) return; items[Number(sg.dataset.i)].accion=a; draw(); });
+    bindChips('#fcta',id=>cid=id); $('#fno').onclick=()=>d.close();
+    $('#fok').onclick=async()=>{ $('#fok').disabled=true;
+      try{ for(const x of items){
+          if(x.accion==='pend') MOVS.unshift(await S.create('movimientos',x.r));
+          else if(x.accion==='pag'){ const met=metodoDe('Egreso',cid)||x.r.metodo; MOVS.unshift(await S.create('movimientos',{...x.r,estado:'pagado',monto:x.r.presupuesto,fecha:today(),vence:'',cuenta:cid,metodo:met,separado:false})); } }
+        const no=items.filter(x=>x.accion==='no').map(x=>x.k);
+        if(no.length){ const C=JSON.parse(JSON.stringify(cfg())); C.fijosOmitidos=C.fijosOmitidos||{}; C.fijosOmitidos[cur]=[...new Set([...(C.fijosOmitidos[cur]||[]),...no])];
+          for(const m of Object.keys(C.fijosOmitidos)) if(m<addMonths(cur,-2)) delete C.fijosOmitidos[m]; await savePerfil({config:C}); }
+        d.close(); toast('Listo'); refreshBadge(); render(); }catch(e){ toast(e.status?e.message:'Sin conexión'); $('#fok').disabled=false; } }; };
+  draw(); d.showModal();
 }
 
 /* ================= MOVIMIENTOS ================= */
@@ -871,7 +919,7 @@ function viewAjustes(){
   <div class="card"><h3>📥 Importar historial</h3><p class="small muted">Sube <code>historial_2026.json</code>. Hazlo una sola vez: si lo subes dos veces, se duplican.</p>
     <input type="file" id="fimp" accept=".json,application/json" class="txt"><div id="impst" class="small" style="margin-top:8px"></div></div>
   <div class="card"><h3>📤 Exportar</h3><p class="small muted">Descarga todo en CSV con las mismas columnas de tu Excel.</p><button class="btn sec" id="exp">Descargar CSV</button></div>
-  <p class="small muted" style="text-align:center">Mis Cuentas v3.1 · Nunca pide ni guarda claves de tu banco.</p>`;
+  <p class="small muted" style="text-align:center">Mis Cuentas v3.2 · Nunca pide ni guarda claves de tu banco.</p>`;
 }
 function bindAjustes(){
   $('#pnomok').onclick=async()=>{ try{ await savePerfil({nombre:$('#pnom').value.trim()}); toast('Perfil guardado'); }catch(e){ toast(e.message); } };
